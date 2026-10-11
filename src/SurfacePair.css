@@ -1,0 +1,22 @@
+.surface-pair {
+  background: transparent;
+  max-width: 100%;
+  aspect-ratio: 1;
+}
+
+.surface-pair canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  /* Keep the low internal resolution crisp when scaled up. */
+  image-rendering: pixelated;
+  cursor: grab;
+  touch-action: none;
+  /* The reference was mirrored left-to-right as the final step. */
+  transform: scaleX(-1);
+}
+
+.surface-pair canvas:active {
+  cursor: grabbing;
+}
