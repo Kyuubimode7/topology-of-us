@@ -339,52 +339,67 @@ function rectangleToHalfTorus(u, v, out, t) {
 }
 
 /*
- * Two flat rectangles side by side in the world xy plane, meeting along part
- * of the line x = 0.
+ * Two copies of Roll up's flat rectangle (RECT_LENGTH x RECT_WIDTH) in the
+ * world xy plane, joined along their long edges.
  *
- * Each rectangle has one edge on that line (the "seam"), with its own length
- * and position along it, and reaches out to -x (top) or +x (bottom). They are
- * joined only where their seam edges overlap. v = 0 runs along the seam and
- * v = 1 along the far edge; u runs along the seam, backwards on the bottom
- * one, so both normals point up (+z, the outside).
+ * A reaches to one side of the seam line and B, its mirror image, to the
+ * other. The seed slides B along the seam in steps of one u grid line (so
+ * the cross lines run straight over the seam) and turns the pair in place
+ * about z. They are joined only where the long edges overlap. v = 0 runs
+ * along the seam and v = 1 along the far edge, as on Roll up; u runs along
+ * the seam, backwards on B, so both normals point up (+z, the outside).
  *
- * Sizes are bounded so the pair always fits the frame without rescaling, and
- * the seam line never moves: changing the seed reshapes the pair in place.
+ * At this size the pair only fits the frame when at least about a third of
+ * the edge is joined, and then only at some angles, so the seed picks among
+ * the angles that fit (seen from the fixed camera, at rest).
  */
-const ISO_SPACING = 0.3 // grid lines, square, about Roll up's density
+const MEETING_ISOCURVES = [24, 4] // Roll up's
+const SLIDE_STEP = RECT_LENGTH / MEETING_ISOCURVES[0]
+const MAX_SLIDE_STEPS = 12 // half the edge: about 33% connected
+// The camera looks from (-1, -1, 2) at the origin with z up (SurfacePair);
+// these are its screen right and up directions.
+const VIEW_RIGHT = new THREE.Vector3(1, -1, 0).normalize()
+const VIEW_UP = new THREE.Vector3(1, 1, 1).normalize()
+const VIEW_FIT = 1.95 // of the +-2 frame
 
 function meetingPair(r) {
-  const halves = [r.range(0.35, 0.7), r.range(0.35, 0.7)] // half seam lengths
-  const depths = [r.range(0.5, 1), r.range(0.5, 1)] // reach away from the seam
+  const slide = SLIDE_STEP * r.int(-MAX_SLIDE_STEPS, MAX_SLIDE_STEPS)
+  const centres = [-slide / 2, slide / 2]
+  const overlap = RECT_LENGTH - Math.abs(slide)
+  const connected = Math.round((100 * overlap) / (RECT_LENGTH + Math.abs(slide)))
 
-  // Slide the seams along their line. They always overlap by at least 10% of
-  // the shorter seam, and at most fully.
-  const shorter = Math.min(...halves)
-  const longer = Math.max(...halves)
-  const shift = r.range(longer - shorter, longer + 0.8 * shorter) * (r.range(0, 1) < 0.5 ? -1 : 1)
-  const centres = [-shift / 2, shift / 2]
-  const ends = [0, 1].map((k) => [centres[k] - halves[k], centres[k] + halves[k]])
-  const overlap = Math.min(ends[0][1], ends[1][1]) - Math.max(ends[0][0], ends[1][0])
-  const span = Math.max(ends[0][1], ends[1][1]) - Math.min(ends[0][0], ends[1][0])
-  const connected = Math.round((100 * overlap) / span)
-
-  // k = 0: top, reaching to -x with u along +y; k = 1: bottom, mirrored.
-  const local = (k, u, v) => {
+  // Unturned point on A (k = 0, to -x) or B (k = 1, to +x).
+  const flat = (k, u, v) => {
     const along = k ? 1 - u : u
-    return [(k ? 1 : -1) * depths[k] * v, centres[k] + halves[k] * (2 * along - 1)]
-  }
-  const surface = (k) => (u, v, out) => out.set(...local(k, u, v), 0)
-  // Square grid lines along and across the seam, continuous over the join.
-  const iso = (k) => (u, v) => {
-    const [x, y] = local(k, u, v)
-    return [y / ISO_SPACING, Math.abs(x) / ISO_SPACING]
+    return [(k ? 1 : -1) * RECT_WIDTH * v, centres[k] + RECT_LENGTH * (along - 0.5)]
   }
 
+  // Angles (whole degrees, 0-179; the pair looks different at 180-359 only
+  // in which colour is where, so those count too) whose corners all fit.
+  const corners = [0, 1].flatMap((k) => [0, 1].flatMap((u) => [0, 1].map((v) => flat(k, u, v))))
+  const p = new THREE.Vector3()
+  const fits = []
+  for (let deg = 0; deg < 360; deg++) {
+    const c = Math.cos((deg * Math.PI) / 180)
+    const s = Math.sin((deg * Math.PI) / 180)
+    const ok = corners.every(([x, y]) => {
+      p.set(x * c - y * s, x * s + y * c, 0)
+      return Math.abs(p.dot(VIEW_RIGHT)) <= VIEW_FIT && Math.abs(p.dot(VIEW_UP)) <= VIEW_FIT
+    })
+    if (ok) fits.push(deg)
+  }
+  const deg = fits[Math.floor(r.range(0, 1) * fits.length)]
+  const cos = Math.cos((deg * Math.PI) / 180)
+  const sin = Math.sin((deg * Math.PI) / 180)
+
+  const surface = (k) => (u, v, out) => {
+    const [x, y] = flat(k, u, v)
+    return out.set(x * cos - y * sin, x * sin + y * cos, 0)
+  }
   return {
-    caption: `${connected}% of edge connected`,
+    caption: `${connected}% of edge connected, turned ${deg}°`,
     top: surface(0),
     bottom: surface(1),
-    iso: { top: iso(0), bottom: iso(1) },
   }
 }
 
@@ -435,7 +450,7 @@ export const SHAPES = {
   // Two flat rectangles meeting along part of one shared edge.
   meeting: {
     label: 'Meeting',
-    isocurves: [16, 6], // unused: the build gives its own grid lines
+    isocurves: MEETING_ISOCURVES,
     seeded: true,
     tumble: false,
     build: (seed) => meetingPair(rng(seed)),
