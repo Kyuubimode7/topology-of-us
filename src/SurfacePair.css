@@ -1,6 +1,8 @@
 .surface-pair {
   background: transparent;
-  max-width: 100%;
+  /* --size is the preferred width; shrink to fit narrow screens, and leave
+     room for the tabs and controls on short ones. */
+  width: min(var(--size, 300px), 100%, max(240px, 100svh - 200px));
   aspect-ratio: 1;
 }
 
@@ -13,6 +15,10 @@
   image-rendering: pixelated;
   cursor: grab;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
   /* The reference was mirrored left-to-right as the final step. */
   transform: scaleX(-1);
 }

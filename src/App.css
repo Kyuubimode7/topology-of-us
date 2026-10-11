@@ -5,7 +5,9 @@
   align-items: center;
   justify-content: center;
   gap: 24px;
-  padding: 16px;
+  /* Keep clear of notches and home indicators (viewport-fit=cover). */
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
   box-sizing: border-box;
   background: #16171d;
   color: #ddd;
@@ -14,7 +16,11 @@
 .tabs {
   display: flex;
   gap: 4px;
+  max-width: 100%;
   border-bottom: 1px solid currentColor;
+  /* Scroll sideways rather than widen the page if the tabs don't fit. */
+  overflow-x: auto;
+  scrollbar-width: none;
 }
 
 .tab {
@@ -26,6 +32,7 @@
   color: inherit;
   opacity: 0.55;
   cursor: pointer;
+  white-space: nowrap;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
 }
@@ -35,11 +42,17 @@
   border-bottom-color: currentColor;
 }
 
+.page button {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
   align-items: center;
+  justify-content: center;
   font-size: 14px;
 }
 
@@ -47,4 +60,82 @@
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+/* Touch screens: bigger targets. */
+@media (pointer: coarse) {
+  .tab {
+    min-height: 44px;
+    padding: 10px 14px;
+  }
+
+  .controls button {
+    min-height: 40px;
+    padding: 0 18px;
+    font-size: 15px;
+  }
+
+  .controls input[type='range'] {
+    height: 32px;
+  }
+}
+
+/* Narrow phones in portrait: one control per row, sliders full width. */
+@media (max-width: 480px) {
+  .page {
+    gap: 16px;
+  }
+
+  .tab {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .controls {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    width: min(100%, 360px);
+  }
+
+  .controls label {
+    justify-content: space-between;
+  }
+
+  .controls input[type='range'] {
+    flex: 0 1 60%;
+  }
+}
+
+/* Phones in landscape: canvas on the left, tabs and controls on the right. */
+@media (orientation: landscape) and (max-height: 540px) {
+  .page {
+    display: grid;
+    grid-template-columns: auto auto;
+    grid-template-areas:
+      'canvas tabs'
+      'canvas controls';
+    align-content: center;
+    justify-content: center;
+    column-gap: 24px;
+    row-gap: 16px;
+  }
+
+  .page .tabs {
+    grid-area: tabs;
+    align-self: end;
+  }
+
+  .page .surface-pair {
+    grid-area: canvas;
+    width: min(var(--size, 300px), 100svh - 32px);
+  }
+
+  .page .controls {
+    grid-area: controls;
+    align-self: start;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
 }

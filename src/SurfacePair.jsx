@@ -19,6 +19,9 @@ const RETURN_DAMPING = 3.2
 const COAST_FRICTION = 1.8 // momentum decay after release, before resuming
 const PHYSICS_STEP = 1 / 240
 const MORPH_S = 0.9 // shape-to-shape transition time
+const MIN_ZOOM = 1 // the reference framing; zooming out would only shrink it
+const MAX_ZOOM = 4
+const WHEEL_ZOOM_SPEED = 0.0015 // per wheel pixel, exponential
 
 // Colours are raw sRGB 0-255 triples, passed straight to the shaders
 // (no THREE.Color, which would convert to linear).
@@ -437,6 +440,7 @@ export default function SurfacePair({
     const yAxis = new THREE.Vector3(0, 1, 0)
     let phase = 0 // 0..1 through the revolution
     let dragging = false
+    let dragPointer = null // only the first finger drags; others are ignored
     let lastX = 0
     let lastY = 0
     let lastInteraction = -Infinity
@@ -466,16 +470,49 @@ export default function SurfacePair({
       }
     }
 
+    // Pinch (two fingers) and the mouse wheel zoom the ortho camera about the
+    // centre. A pinch ends any drag; the drag restarts only on a fresh touch.
+    const pointers = new Map() // pointerId -> { x, y }
+    let pinchDistance = 0
+    const pinchSpan = () => {
+      const [a, b] = pointers.values()
+      return Math.hypot(a.x - b.x, a.y - b.y)
+    }
+    const setZoom = (zoom) => {
+      camera.zoom = THREE.MathUtils.clamp(zoom, MIN_ZOOM, MAX_ZOOM)
+      camera.updateProjectionMatrix()
+    }
+
     const onPointerDown = (e) => {
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      canvas.setPointerCapture(e.pointerId)
+      lastInteraction = performance.now()
+      if (pointers.size === 2) {
+        dragging = false
+        dragPointer = null
+        pinchDistance = pinchSpan()
+        return
+      }
+      if (pointers.size > 1) return
       dragging = true
+      dragPointer = e.pointerId
       lastX = e.clientX
       lastY = e.clientY
-      lastInteraction = performance.now()
       dragTarget.copy(offset)
-      canvas.setPointerCapture(e.pointerId)
     }
     const onPointerMove = (e) => {
-      if (!dragging) return
+      const p = pointers.get(e.pointerId)
+      if (!p) return
+      p.x = e.clientX
+      p.y = e.clientY
+      if (pointers.size === 2) {
+        const span = pinchSpan()
+        if (pinchDistance > 0 && span > 0) setZoom((camera.zoom * span) / pinchDistance)
+        pinchDistance = span
+        lastInteraction = performance.now()
+        return
+      }
+      if (!dragging || e.pointerId !== dragPointer) return
       const dx = e.clientX - lastX
       const dy = e.clientY - lastY
       lastX = e.clientX
@@ -488,14 +525,25 @@ export default function SurfacePair({
       dragTarget.normalize()
     }
     const onPointerUp = (e) => {
-      dragging = false
-      lastInteraction = performance.now()
+      if (!pointers.delete(e.pointerId)) return
       if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId)
+      lastInteraction = performance.now()
+      if (pointers.size === 2) pinchDistance = pinchSpan()
+      if (e.pointerId !== dragPointer) return
+      dragging = false
+      dragPointer = null
+    }
+    const onWheel = (e) => {
+      e.preventDefault()
+      // deltaMode 1 is lines (Firefox); treat a line as ~16px.
+      const delta = e.deltaY * (e.deltaMode === 1 ? 16 : 1)
+      setZoom(camera.zoom * Math.exp(-delta * WHEEL_ZOOM_SPEED))
     }
     canvas.addEventListener('pointerdown', onPointerDown)
     canvas.addEventListener('pointermove', onPointerMove)
     canvas.addEventListener('pointerup', onPointerUp)
     canvas.addEventListener('pointercancel', onPointerUp)
+    canvas.addEventListener('wheel', onWheel, { passive: false })
 
     renderer.setAnimationLoop((ms) => {
       const { top, bottom, steps, resumeDelay } = paramsRef.current
@@ -540,6 +588,7 @@ export default function SurfacePair({
       canvas.removeEventListener('pointermove', onPointerMove)
       canvas.removeEventListener('pointerup', onPointerUp)
       canvas.removeEventListener('pointercancel', onPointerUp)
+      canvas.removeEventListener('wheel', onWheel)
       scene.remove(model.group)
       postGeometry.dispose()
       postMaterial.dispose()
@@ -556,7 +605,8 @@ export default function SurfacePair({
     <div
       ref={mountRef}
       className="surface-pair"
-      style={{ width: size }}
+      // The width is clamped in CSS so the canvas fits small and short screens.
+      style={{ '--size': `${size}px` }}
     />
   )
 }
