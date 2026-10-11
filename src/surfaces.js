@@ -314,177 +314,91 @@ function rectangleToHalfTorus(u, v, out, t) {
 }
 
 /*
- * Two open patches that just meet along one shared edge.
+ * Two flat patches that meet along part of one straight line.
  *
- * Each patch is laid out in local coordinates with the shared edge (the
- * "seam") on lx = 0 and the patch on lx < 0. v = 0 runs along the seam,
- * v = 1 along the patch's free outer edge, and u runs from one end of the
- * seam to the other, so both v edges get the seam outline in the shader.
- * The right-hand patch is the mirror image (and runs u backwards, so du x dv
- * still points up, +z, which counts as the outside).
+ * Each patch is a flat, round-edged region with one straight edge (the
+ * "seam"), laid out with the seam on lx = 0 and the patch on lx < 0. v = 0
+ * runs along the seam, v = 1 along the free outer edge, and u runs from one
+ * end of the seam to the other, so both v edges get the seam outline in the
+ * shader. The right-hand patch is the mirror image (and runs u backwards, so
+ * du x dv still points up, +z, which counts as the outside before rotating).
  *
- * Height is the patch's own surface type, blended near the seam into the
- * shared seam curve plus a per-patch slope, so the two meet exactly at a
- * crease.
+ * Both seams lie on the same line but have their own lengths and positions
+ * along it, so the patches are joined only where the seams overlap. Each
+ * patch then swings about that line by its own angle, and the pair is turned
+ * as a whole.
  */
-const PATCH_TYPES = {
-  dome: (s, t) => 1 - (s * s + t * t),
-  bowl: (s, t) => s * s + t * t - 1,
-  saddle: (s, t) => s * s - t * t,
-  'monkey saddle': (s, t) => 0.5 * (s ** 3 - 3 * s * t * t),
-  ripple: (s, t) => Math.cos(1.5 * Math.PI * Math.hypot(s, t)),
-  ridge: (s, t) => 1 - 2 * t * t,
-  wave: (s, t, phase) => Math.sin(Math.PI * (s + 0.5 * t) + phase),
-  plane: (s, t, phase) => 0.8 * Math.cos(phase) * s + 0.5 * Math.sin(phase) * t,
-}
-const PATCH_NAMES = Object.keys(PATCH_TYPES)
-
-function randomPatch(r, halfSeam) {
-  const name = PATCH_NAMES[r.int(0, PATCH_NAMES.length - 1)]
-  const type = PATCH_TYPES[name]
-  const amp = r.range(0.2, 0.32)
-  const phase = r.phase()
+function randomFlatPatch(r) {
+  const halfSeam = r.range(0.45, 0.85)
   const depth = r.range(0.9, 1.35) // how far the patch reaches from the seam
-  const flare = r.range(0, 0.35) // outer edge wider than the seam
+  const flare = r.range(0, 0.3) // outer edge wider than the seam
   const lobes = r.range(0, 0.12)
   const lobeFreq = r.int(2, 4)
   const lean = r.range(-0.25, 0.25)
-  const slope = r.range(-0.6, 0.6) // across the seam; differing slopes crease
-  const blend = depth * r.range(0.35, 0.55)
-  const width = halfSeam + flare
 
-  // Plane point (lx, ly) for grid (u, v): straight across from the seam to
-  // the rounded outer edge.
-  // `retreat` pulls the seam edge straight back (flat, in the plane) where the
-  // seam is open; it is scaled by sin so it vanishes at the seam's ends.
-  const plane = (u, v, retreat = 0) => {
+  // Plane point (lx, ly) for grid (u, v), ly relative to the seam's centre.
+  const plane = (u, v) => {
     const psi = Math.PI * u
     const sin = Math.sin(psi)
     const cos = Math.cos(psi)
     const reach = depth * sin * (1 + lobes * Math.sin(lobeFreq * psi))
-    const outerX = -reach
     const outerY = -cos * (halfSeam + flare * sin) + lean * sin * sin
-    const seamX = -retreat * sin
-    const seamY = -halfSeam * cos
-    return [lerp(seamX, outerX, v), lerp(seamY, outerY, v)]
+    return [-reach * v, lerp(-halfSeam * cos, outerY, v)]
   }
-  const height = (lx, ly, seamZ) => {
-    // s, t ~ [-1, 1] across the patch, s = 1 at the seam.
-    const s = (2 * lx) / depth + 1
-    const t = ly / width
-    const own = amp * type(s, t, phase)
-    const w = 1 - smoothstep(0, blend, -lx)
-    return lerp(own, seamZ + slope * lx, w)
-  }
-  return { name, plane, height }
+  return { halfSeam, plane }
 }
 
-// Gaps along the Meeting seam: a whole-number percentage (10-90%) of its
-// length stays connected; the rest is split into 1-3 non-overlapping gaps.
-// opening(s) gives [leftRetreat, rightRetreat] at seam position s in [0, 1]
-// (s maps to y = -cos(PI * s), so length fraction is (1 - cos(PI * s)) / 2).
-// One lip of each gap pulls back further than the other.
-function randomSeamGaps(r, halfSeam) {
-  const connected = r.int(10, 90)
-  const open = 1 - connected / 100
-  const count = r.int(1, 3)
-  const closedParts = randomParts(r, 1 - open, count + 1)
-  const openParts = randomParts(r, open, count)
-  let at = 0
-  const gaps = openParts.map((length, i) => {
-    at += closedParts[i]
-    const start = at
-    at += length
-    // Short gaps pull back less, so the lip's ramp never folds the grid.
-    const retreat = Math.min(r.range(0.12, 0.3), 0.25 * length * 2 * halfSeam)
-    const lesserLip = r.range(0.3, 0.7)
-    const leftPulls = r.range(0, 1) < 0.5
-    return {
-      start,
-      length,
-      left: retreat * (leftPulls ? 1 : lesserLip),
-      right: retreat * (leftPulls ? lesserLip : 1),
-    }
-  })
-  const opening = (s) => {
-    const x = (1 - Math.cos(Math.PI * s)) / 2
-    for (const g of gaps) {
-      const d = x - g.start
-      if (d <= 0 || d >= g.length) continue
-      const ease = smoothstep(0, Math.min(0.15, g.length / 2), Math.min(d, g.length - d))
-      return [g.left * ease, g.right * ease]
-    }
-    return [0, 0]
-  }
-  return { connected, opening }
-}
+const FIT_RADIUS = 1.8 // scale a pair down if it would reach past this
 
 function meetingPair(r) {
-  const halfSeam = r.range(0.55, 0.85)
-  const seamBend = wave(r, 0, 0.15, 1, 2) // sideways wiggle of the seam, by y
-  const seamLift = wave(r, 0.04, 0.16, 1, 2) // height of the seam, by y
-  const scale = 1 / halfSeam // the waves see y in [-1, 1]
-  const left = randomPatch(r, halfSeam)
-  const right = randomPatch(r, halfSeam)
-  // Drawn last, so adding the gaps kept every seed's patches.
-  const { connected, opening } = randomSeamGaps(r, halfSeam)
-  // Hinge angles, drawn after everything else: each patch swings about the
-  // seam, from -45deg (tipped down) to 90deg (upright), in 15deg steps, at
-  // least 45deg apart. If the patches would still cut into each other, the
-  // steeper one is lowered 15deg at a time until they clear (below).
-  let leftDeg = 15 * r.int(-3, 6)
-  let rightDeg = 15 * r.int(-3, Math.min(6, (135 - leftDeg) / 15))
+  const left = randomFlatPatch(r)
+  const right = randomFlatPatch(r)
+
+  // Slide the seams along their shared line. They always overlap by at least
+  // 10% of the shorter seam, and at most fully.
+  const shorter = Math.min(left.halfSeam, right.halfSeam)
+  const longer = Math.max(left.halfSeam, right.halfSeam)
+  const shift = r.range(longer - shorter, longer + shorter - 0.2 * shorter) * (r.range(0, 1) < 0.5 ? -1 : 1)
+  const leftCentre = -shift / 2
+  const rightCentre = shift / 2
+  const overlap =
+    Math.min(leftCentre + left.halfSeam, rightCentre + right.halfSeam) -
+    Math.max(leftCentre - left.halfSeam, rightCentre - right.halfSeam)
+  const span =
+    Math.max(leftCentre + left.halfSeam, rightCentre + right.halfSeam) -
+    Math.min(leftCentre - left.halfSeam, rightCentre - right.halfSeam)
+  const connected = Math.round((100 * overlap) / span)
+
+  // Hinge angles about the seam line, measured up from flat; the patches
+  // stay at least 30deg apart so they can't fold onto each other.
+  const leftDeg = r.range(-45, 90)
+  const rightDeg = r.range(-45, Math.min(90, 150 - leftDeg))
+  const between = Math.round(180 - leftDeg - rightDeg)
   const hinge = (deg) => [Math.cos((deg * Math.PI) / 180), Math.sin((deg * Math.PI) / 180)]
   const hinges = [hinge(leftDeg), hinge(rightDeg)]
-  const centre = new THREE.Vector3()
+  // The whole pair's orientation.
+  const turn = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(r.range(-0.6, 0.6), r.range(-0.6, 0.6), r.phase()),
+  )
 
-  // The patch is built flat (seam along y, patch towards -x, height z), then
-  // its offset from the seam point at the same y is swung about the seam's
-  // direction. Seam points have zero offset, so connected stretches match
-  // exactly at any angles.
+  const centre = new THREE.Vector3()
+  let scale = 1
   const point = (patch, mirror, u, v, out) => {
-    const s = mirror ? 1 - u : u // position along the seam, same for both
-    const [leftGap, rightGap] = opening(s)
-    const [lx, ly] = patch.plane(s, v, mirror ? rightGap : leftGap)
-    const yy = ly * scale * 0.25 // a quarter turn of the waves over the seam
-    const seamZ = seamLift(yy)
-    const dz = patch.height(lx, ly, seamZ) - seamZ
+    const [lx, ly] = patch.plane(mirror ? 1 - u : u, v)
     const [cos, sin] = hinges[mirror ? 1 : 0]
-    const rx = lx * cos + dz * sin
-    const rz = -lx * sin + dz * cos
+    const rx = lx * cos
+    const rz = -lx * sin
+    const y = ly + (mirror ? rightCentre : leftCentre)
     return out
-      .set((mirror ? -rx : rx) + seamBend(yy), ly, seamZ + rz)
+      .set(mirror ? -rx : rx, y, rz)
+      .applyQuaternion(turn)
       .sub(centre)
+      .multiplyScalar(scale)
   }
   const top = (u, v, out) => point(left, false, u, v, out)
   const bottom = (u, v, out) => point(right, true, u, v, out)
 
-  // Do the patches pass through each other? Compare coarse samples of each,
-  // skipping those near the seam (where they meet on purpose).
-  const sample = (f) => {
-    const pts = []
-    for (let j = 1; j <= 12; j++) {
-      for (let i = 0; i <= 72; i++) {
-        const q = f(i / 72, j / 12, new THREE.Vector3())
-        const seam = f(i / 72, 0, new THREE.Vector3())
-        if (q.distanceTo(seam) > 0.2) pts.push(q)
-      }
-    }
-    return pts
-  }
-  const collides = () => {
-    const a = sample(top)
-    const b = sample(bottom)
-    return a.some((p) => b.some((q) => p.distanceToSquared(q) < 0.1 * 0.1))
-  }
-  for (let tries = 0; tries < 12 && collides(); tries++) {
-    if (leftDeg >= rightDeg) leftDeg -= 15
-    else rightDeg -= 15
-    hinges[0] = hinge(leftDeg)
-    hinges[1] = hinge(rightDeg)
-  }
-
-  // Centre the pair's bounding box, which moves as the patches swing.
+  // Centre the pair's bounding box, then shrink it if it reaches too far.
   const box = new THREE.Box3()
   const p = new THREE.Vector3()
   for (const f of [top, bottom]) {
@@ -493,9 +407,16 @@ function meetingPair(r) {
     }
   }
   box.getCenter(centre)
+  let reach = 0
+  for (const f of [top, bottom]) {
+    for (let j = 0; j <= V_SEG; j++) {
+      for (let i = 0; i <= U_SEG; i++) reach = Math.max(reach, f(i / U_SEG, j / V_SEG, p).length())
+    }
+  }
+  scale = Math.min(1, FIT_RADIUS / reach)
 
   return {
-    caption: `${left.name} at ${leftDeg}° meets ${right.name} at ${rightDeg}°, ${connected}% connected`,
+    caption: `planes ${between}° apart, ${connected}% of edge connected`,
     top,
     bottom,
   }
@@ -543,7 +464,7 @@ export const SHAPES = {
     },
   },
 
-  // Two different open surfaces meeting along one shared edge.
+  // Two flat patches meeting along part of one shared edge.
   meeting: {
     label: 'Meeting',
     isocurves: [16, 6],
