@@ -429,7 +429,8 @@ function randomFlatPatch(r) {
 // Every pair is scaled to reach exactly this far from the centre, about the
 // torus's size (1.42), so seeds look alike in size and never fill the frame.
 const MEETING_RADIUS = 1.4
-const ISO_SPACING = 0.15 // Meeting's grid lines, in patch units
+// Meeting's grid-line spacing on screen (after scaling), about Roll up's.
+const ISO_SPACING = 0.3
 
 function meetingPair(r) {
   const left = randomFlatPatch(r)
@@ -457,12 +458,10 @@ function meetingPair(r) {
   const between = Math.round(180 - leftDeg - rightDeg)
   const hinge = (deg) => [Math.cos((deg * Math.PI) / 180), Math.sin((deg * Math.PI) / 180)]
   const hinges = [hinge(leftDeg), hinge(rightDeg)]
-  // The whole pair's orientation.
-  const turn = new THREE.Quaternion().setFromEuler(
-    new THREE.Euler(r.range(-0.6, 0.6), r.range(-0.6, 0.6), r.phase()),
-  )
 
-  const centre = new THREE.Vector3()
+  // The shared line stays put (along y, through the centre) for every seed,
+  // so changing the seed reshapes the pair in place instead of flinging it
+  // round the frame. Only the size is normalised.
   let scale = 1
   const point = (patch, mirror, u, v, out) => {
     const [lx, ly] = patch.plane(mirror ? 1 - u : u, v)
@@ -472,29 +471,21 @@ function meetingPair(r) {
     const y = ly + (mirror ? rightCentre : leftCentre)
     return out
       .set(mirror ? -rx : rx, y, rz)
-      .applyQuaternion(turn)
-      .sub(centre)
       .multiplyScalar(scale)
   }
   const top = (u, v, out) => point(left, false, u, v, out)
   const bottom = (u, v, out) => point(right, true, u, v, out)
   // Grid lines along and across the seam line, square and evenly spaced in
-  // each patch's plane, and continuous across the join.
+  // each patch's plane (ISO_SPACING apart on screen), continuous across the
+  // join. They read `scale` when sampled, after it is set below.
   const iso = (patch, mirror) => (u, v) => {
     const [lx, ly] = patch.plane(mirror ? 1 - u : u, v)
     const y = ly + (mirror ? rightCentre : leftCentre)
-    return [y / ISO_SPACING, -lx / ISO_SPACING]
+    return [(y * scale) / ISO_SPACING, (-lx * scale) / ISO_SPACING]
   }
 
-  // Centre the pair's bounding box, then scale it to MEETING_RADIUS.
-  const box = new THREE.Box3()
+  // Scale to MEETING_RADIUS.
   const p = new THREE.Vector3()
-  for (const f of [top, bottom]) {
-    for (let j = 0; j <= V_SEG; j++) {
-      for (let i = 0; i <= U_SEG; i++) box.expandByPoint(f(i / U_SEG, j / V_SEG, p))
-    }
-  }
-  box.getCenter(centre)
   let reach = 0
   for (const f of [top, bottom]) {
     for (let j = 0; j <= V_SEG; j++) {
