@@ -428,19 +428,76 @@ function meetingPair(r) {
   const right = randomPatch(r, halfSeam)
   // Drawn last, so adding the gaps kept every seed's patches.
   const { connected, opening } = randomSeamGaps(r, halfSeam)
+  // Hinge angles, drawn after everything else: each patch swings about the
+  // seam, from -45deg (tipped down) to 90deg (upright), in 15deg steps, at
+  // least 45deg apart. If the patches would still cut into each other, the
+  // steeper one is lowered 15deg at a time until they clear (below).
+  let leftDeg = 15 * r.int(-3, 6)
+  let rightDeg = 15 * r.int(-3, Math.min(6, (135 - leftDeg) / 15))
+  const hinge = (deg) => [Math.cos((deg * Math.PI) / 180), Math.sin((deg * Math.PI) / 180)]
+  const hinges = [hinge(leftDeg), hinge(rightDeg)]
+  const centre = new THREE.Vector3()
 
+  // The patch is built flat (seam along y, patch towards -x, height z), then
+  // its offset from the seam point at the same y is swung about the seam's
+  // direction. Seam points have zero offset, so connected stretches match
+  // exactly at any angles.
   const point = (patch, mirror, u, v, out) => {
     const s = mirror ? 1 - u : u // position along the seam, same for both
     const [leftGap, rightGap] = opening(s)
     const [lx, ly] = patch.plane(s, v, mirror ? rightGap : leftGap)
     const yy = ly * scale * 0.25 // a quarter turn of the waves over the seam
-    const z = patch.height(lx, ly, seamLift(yy))
-    return out.set((mirror ? -lx : lx) + seamBend(yy), ly, z)
+    const seamZ = seamLift(yy)
+    const dz = patch.height(lx, ly, seamZ) - seamZ
+    const [cos, sin] = hinges[mirror ? 1 : 0]
+    const rx = lx * cos + dz * sin
+    const rz = -lx * sin + dz * cos
+    return out
+      .set((mirror ? -rx : rx) + seamBend(yy), ly, seamZ + rz)
+      .sub(centre)
   }
+  const top = (u, v, out) => point(left, false, u, v, out)
+  const bottom = (u, v, out) => point(right, true, u, v, out)
+
+  // Do the patches pass through each other? Compare coarse samples of each,
+  // skipping those near the seam (where they meet on purpose).
+  const sample = (f) => {
+    const pts = []
+    for (let j = 1; j <= 12; j++) {
+      for (let i = 0; i <= 72; i++) {
+        const q = f(i / 72, j / 12, new THREE.Vector3())
+        const seam = f(i / 72, 0, new THREE.Vector3())
+        if (q.distanceTo(seam) > 0.2) pts.push(q)
+      }
+    }
+    return pts
+  }
+  const collides = () => {
+    const a = sample(top)
+    const b = sample(bottom)
+    return a.some((p) => b.some((q) => p.distanceToSquared(q) < 0.1 * 0.1))
+  }
+  for (let tries = 0; tries < 12 && collides(); tries++) {
+    if (leftDeg >= rightDeg) leftDeg -= 15
+    else rightDeg -= 15
+    hinges[0] = hinge(leftDeg)
+    hinges[1] = hinge(rightDeg)
+  }
+
+  // Centre the pair's bounding box, which moves as the patches swing.
+  const box = new THREE.Box3()
+  const p = new THREE.Vector3()
+  for (const f of [top, bottom]) {
+    for (let j = 0; j <= V_SEG; j++) {
+      for (let i = 0; i <= U_SEG; i++) box.expandByPoint(f(i / U_SEG, j / V_SEG, p))
+    }
+  }
+  box.getCenter(centre)
+
   return {
-    caption: `${left.name} meets ${right.name}, ${connected}% connected`,
-    top: (u, v, out) => point(left, false, u, v, out),
-    bottom: (u, v, out) => point(right, true, u, v, out),
+    caption: `${left.name} at ${leftDeg}° meets ${right.name} at ${rightDeg}°, ${connected}% connected`,
+    top,
+    bottom,
   }
 }
 
