@@ -355,15 +355,18 @@ function randomPatch(r, halfSeam) {
 
   // Plane point (lx, ly) for grid (u, v): straight across from the seam to
   // the rounded outer edge.
-  const plane = (u, v) => {
+  // `retreat` pulls the seam edge straight back (flat, in the plane) where the
+  // seam is open; it is scaled by sin so it vanishes at the seam's ends.
+  const plane = (u, v, retreat = 0) => {
     const psi = Math.PI * u
     const sin = Math.sin(psi)
     const cos = Math.cos(psi)
     const reach = depth * sin * (1 + lobes * Math.sin(lobeFreq * psi))
     const outerX = -reach
     const outerY = -cos * (halfSeam + flare * sin) + lean * sin * sin
+    const seamX = -retreat * sin
     const seamY = -halfSeam * cos
-    return [outerX * v, lerp(seamY, outerY, v)]
+    return [lerp(seamX, outerX, v), lerp(seamY, outerY, v)]
   }
   const height = (lx, ly, seamZ) => {
     // s, t ~ [-1, 1] across the patch, s = 1 at the seam.
@@ -376,6 +379,46 @@ function randomPatch(r, halfSeam) {
   return { name, plane, height }
 }
 
+// Gaps along the Meeting seam: a whole-number percentage (10-90%) of its
+// length stays connected; the rest is split into 1-3 non-overlapping gaps.
+// opening(s) gives [leftRetreat, rightRetreat] at seam position s in [0, 1]
+// (s maps to y = -cos(PI * s), so length fraction is (1 - cos(PI * s)) / 2).
+// One lip of each gap pulls back further than the other.
+function randomSeamGaps(r, halfSeam) {
+  const connected = r.int(10, 90)
+  const open = 1 - connected / 100
+  const count = r.int(1, 3)
+  const closedParts = randomParts(r, 1 - open, count + 1)
+  const openParts = randomParts(r, open, count)
+  let at = 0
+  const gaps = openParts.map((length, i) => {
+    at += closedParts[i]
+    const start = at
+    at += length
+    // Short gaps pull back less, so the lip's ramp never folds the grid.
+    const retreat = Math.min(r.range(0.12, 0.3), 0.25 * length * 2 * halfSeam)
+    const lesserLip = r.range(0.3, 0.7)
+    const leftPulls = r.range(0, 1) < 0.5
+    return {
+      start,
+      length,
+      left: retreat * (leftPulls ? 1 : lesserLip),
+      right: retreat * (leftPulls ? lesserLip : 1),
+    }
+  })
+  const opening = (s) => {
+    const x = (1 - Math.cos(Math.PI * s)) / 2
+    for (const g of gaps) {
+      const d = x - g.start
+      if (d <= 0 || d >= g.length) continue
+      const ease = smoothstep(0, Math.min(0.15, g.length / 2), Math.min(d, g.length - d))
+      return [g.left * ease, g.right * ease]
+    }
+    return [0, 0]
+  }
+  return { connected, opening }
+}
+
 function meetingPair(r) {
   const halfSeam = r.range(0.55, 0.85)
   const seamBend = wave(r, 0, 0.15, 1, 2) // sideways wiggle of the seam, by y
@@ -383,15 +426,19 @@ function meetingPair(r) {
   const scale = 1 / halfSeam // the waves see y in [-1, 1]
   const left = randomPatch(r, halfSeam)
   const right = randomPatch(r, halfSeam)
+  // Drawn last, so adding the gaps kept every seed's patches.
+  const { connected, opening } = randomSeamGaps(r, halfSeam)
 
   const point = (patch, mirror, u, v, out) => {
-    const [lx, ly] = patch.plane(mirror ? 1 - u : u, v)
+    const s = mirror ? 1 - u : u // position along the seam, same for both
+    const [leftGap, rightGap] = opening(s)
+    const [lx, ly] = patch.plane(s, v, mirror ? rightGap : leftGap)
     const yy = ly * scale * 0.25 // a quarter turn of the waves over the seam
     const z = patch.height(lx, ly, seamLift(yy))
     return out.set((mirror ? -lx : lx) + seamBend(yy), ly, z)
   }
   return {
-    caption: `${left.name} meets ${right.name}`,
+    caption: `${left.name} meets ${right.name}, ${connected}% connected`,
     top: (u, v, out) => point(left, false, u, v, out),
     bottom: (u, v, out) => point(right, true, u, v, out),
   }
