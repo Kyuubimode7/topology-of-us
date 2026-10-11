@@ -38,6 +38,9 @@ npm run lint    # oxlint; keep it at zero warnings
 
 - A shape's `build(seed)` returns `{ top, bottom }`. Each is `fn(u, v, out[, t]) -> Vector3` with u, v in [0, 1]. u runs around the ring. v crosses the surface from seam to seam: top goes outer seam → over → inner seam; bottom goes inner → under → outer.
 - `stitchedPair` evaluates both surfaces from the same seam points, so seams close exactly. `open.outer/inner(u)` returns `[topTrim, bottomTrim]` radians, which pulls a lip back along its own arc to tear the seam.
+- Open seam: each seed picks a whole-number connected percentage (10–90%) of both seams together, measured in u. `randomOpening` splits the open part between the seams and into non-overlapping tears, so the percentage is exact. Keep tears non-overlapping, or the caption stops being true.
+- Meeting: not a ring. Two open patches meet along one shared edge: v = 0 is the shared seam, v = 1 the free outer edge, and u runs from one end of the seam to the other. The right patch is mirrored and runs u backwards, so both normals point up (+z = outside). The seed picks each patch's type from `PATCH_TYPES`. Height blends into the shared seam curve near the seam, so the seams match exactly.
+- A build may return a `caption` (what the seed picked). `App.jsx` shows it next to the seed slider.
 - A `null` surface is hidden: it morphs onto the other surface, hides, then tracks it so it can peel off later. `animation: { duration }` shapes take `t` in [0, 1] and play after the morph.
 - **Every shape uses the one `SEGMENTS` grid (144 × 24).** Morphing lerps grid points one to one, so don't give a shape its own resolution.
 - **Normals must point out of the shell** (du × dv outward). The shader treats back faces as the inside (darker colour, shadow-mapped). New parametrisations must keep that orientation; check it numerically.

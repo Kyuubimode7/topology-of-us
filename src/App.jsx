@@ -9,6 +9,8 @@ function App() {
   const [seed, setSeed] = useState(1)
   const [replay, setReplay] = useState(0)
   const shape = SHAPES[tab]
+  // What the seed picked (e.g. how much seam is connected); builds are cheap.
+  const caption = shape.seeded ? shape.build(seed).caption : null
 
   return (
     <main className="page">
@@ -47,6 +49,7 @@ function App() {
             />
           </label>
         )}
+        {caption && <span className="caption">{caption}</span>}
         <label>
           Bands {steps === 0 ? '(smooth)' : steps}
           <input

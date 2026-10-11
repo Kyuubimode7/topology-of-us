@@ -142,13 +142,6 @@ export function writeSurface(geometry, grid) {
   geometry.computeBoundingSphere()
 }
 
-// Smooth bump around the ring: 1 at u = centre, 0 beyond halfWidth (wraps).
-const bump = (u, centre, halfWidth) => {
-  const d0 = Math.abs(u - centre) % 1
-  const d = Math.min(d0, 1 - d0)
-  return d < halfWidth ? Math.cos((Math.PI / 2) * (d / halfWidth)) ** 2 : 0
-}
-
 // Small seeded PRNG (mulberry32), so a seed always gives the same shape.
 function rng(seed) {
   let a = seed >>> 0
@@ -205,27 +198,72 @@ function randomStitched(r) {
   }
 }
 
-// Tears along one seam: [topTrim, bottomTrim] per u. One lip of each tear
+// Split total into n random positive parts.
+const randomParts = (r, total, n) => {
+  const weights = Array.from({ length: n }, () => r.range(0.5, 1.5))
+  const sum = weights.reduce((a, b) => a + b, 0)
+  return weights.map((w) => (total * w) / sum)
+}
+
+// Tears along one seam: [topTrim, bottomTrim] per u. `open` is the fraction of
+// the seam (in u) that is torn, split into `count` tears with closed stretches
+// between them, so exactly 1 - open stays connected. One lip of each tear
 // peels back further than the other, so tears gape up or down.
-function randomTears(r, count) {
-  const tears = Array.from({ length: count }, () => {
-    const centre = r.range(0, 1)
-    const halfWidth = r.range(0.05, 0.13)
+function randomTears(r, open, count) {
+  if (open <= 0 || count === 0) return CLOSED
+  const closedParts = randomParts(r, 1 - open, count)
+  const openParts = randomParts(r, open, count)
+  let at = r.range(0, 1)
+  const tears = openParts.map((length, i) => {
+    at += closedParts[i]
+    const start = at
+    at += length
     const depth = r.range(0.4, 0.8)
     const lesserLip = r.range(0.3, 0.7)
     const topPeels = r.range(0, 1) < 0.5
-    return { centre, halfWidth, depth, top: topPeels ? 1 : lesserLip, bottom: topPeels ? lesserLip : 1 }
+    // Long tears gape unevenly along their length.
+    const ripple = r.range(0, 0.25)
+    const rippleFreq = r.int(1, 3)
+    const ripplePhase = r.phase()
+    return {
+      start,
+      length,
+      depth,
+      ripple,
+      rippleFreq,
+      ripplePhase,
+      top: topPeels ? 1 : lesserLip,
+      bottom: topPeels ? lesserLip : 1,
+    }
   })
   return (u) => {
-    let top = 0
-    let bottom = 0
     for (const t of tears) {
-      const g = t.depth * bump(u, t.centre, t.halfWidth)
-      top += t.top * g
-      bottom += t.bottom * g
+      const d = (((u - t.start) % 1) + 1) % 1
+      if (d >= t.length) continue
+      // Open strictly inside the tear, easing to closed over a short shoulder.
+      const shoulder = Math.min(0.04, t.length / 2)
+      const ease = smoothstep(0, shoulder, Math.min(d, t.length - d))
+      const vary = 1 + t.ripple * Math.sin(TAU * t.rippleFreq * (d / t.length) + t.ripplePhase)
+      const g = Math.min(t.depth * vary * ease, 1)
+      return [t.top * g, t.bottom * g]
     }
-    // Overlapping tears never retract a lip by more than 1 rad.
-    return [Math.min(top, 1), Math.min(bottom, 1)]
+    return [0, 0]
+  }
+}
+
+// Open seam tears: a whole-number percentage of the seam (both seams together,
+// measured around the ring) stays connected, 10-90%. The open part is shared
+// out between the outer and inner seams, each at most 95% open.
+function randomOpening(r) {
+  const connected = r.int(10, 90)
+  const total = 2 * (1 - connected / 100)
+  const share = r.range(0.3, 0.7)
+  const outerOpen = Math.min(Math.max(total * share, total - 0.95, 0), 0.95, total)
+  const innerOpen = total - outerOpen
+  return {
+    connected,
+    outer: randomTears(r, outerOpen, r.int(1, 3)),
+    inner: randomTears(r, innerOpen, r.int(1, 3)),
   }
 }
 
@@ -275,7 +313,92 @@ function rectangleToHalfTorus(u, v, out, t) {
   return out.set(py, -px, z)
 }
 
-// Each shape builds its surface pair from a seed; `seeded` shapes use it.
+/*
+ * Two open patches that just meet along one shared edge.
+ *
+ * Each patch is laid out in local coordinates with the shared edge (the
+ * "seam") on lx = 0 and the patch on lx < 0. v = 0 runs along the seam,
+ * v = 1 along the patch's free outer edge, and u runs from one end of the
+ * seam to the other, so both v edges get the seam outline in the shader.
+ * The right-hand patch is the mirror image (and runs u backwards, so du x dv
+ * still points up, +z, which counts as the outside).
+ *
+ * Height is the patch's own surface type, blended near the seam into the
+ * shared seam curve plus a per-patch slope, so the two meet exactly at a
+ * crease.
+ */
+const PATCH_TYPES = {
+  dome: (s, t) => 1 - (s * s + t * t),
+  bowl: (s, t) => s * s + t * t - 1,
+  saddle: (s, t) => s * s - t * t,
+  'monkey saddle': (s, t) => 0.5 * (s ** 3 - 3 * s * t * t),
+  ripple: (s, t) => Math.cos(1.5 * Math.PI * Math.hypot(s, t)),
+  ridge: (s, t) => 1 - 2 * t * t,
+  wave: (s, t, phase) => Math.sin(Math.PI * (s + 0.5 * t) + phase),
+  plane: (s, t, phase) => 0.8 * Math.cos(phase) * s + 0.5 * Math.sin(phase) * t,
+}
+const PATCH_NAMES = Object.keys(PATCH_TYPES)
+
+function randomPatch(r, halfSeam) {
+  const name = PATCH_NAMES[r.int(0, PATCH_NAMES.length - 1)]
+  const type = PATCH_TYPES[name]
+  const amp = r.range(0.2, 0.32)
+  const phase = r.phase()
+  const depth = r.range(0.9, 1.35) // how far the patch reaches from the seam
+  const flare = r.range(0, 0.35) // outer edge wider than the seam
+  const lobes = r.range(0, 0.12)
+  const lobeFreq = r.int(2, 4)
+  const lean = r.range(-0.25, 0.25)
+  const slope = r.range(-0.6, 0.6) // across the seam; differing slopes crease
+  const blend = depth * r.range(0.35, 0.55)
+  const width = halfSeam + flare
+
+  // Plane point (lx, ly) for grid (u, v): straight across from the seam to
+  // the rounded outer edge.
+  const plane = (u, v) => {
+    const psi = Math.PI * u
+    const sin = Math.sin(psi)
+    const cos = Math.cos(psi)
+    const reach = depth * sin * (1 + lobes * Math.sin(lobeFreq * psi))
+    const outerX = -reach
+    const outerY = -cos * (halfSeam + flare * sin) + lean * sin * sin
+    const seamY = -halfSeam * cos
+    return [outerX * v, lerp(seamY, outerY, v)]
+  }
+  const height = (lx, ly, seamZ) => {
+    // s, t ~ [-1, 1] across the patch, s = 1 at the seam.
+    const s = (2 * lx) / depth + 1
+    const t = ly / width
+    const own = amp * type(s, t, phase)
+    const w = 1 - smoothstep(0, blend, -lx)
+    return lerp(own, seamZ + slope * lx, w)
+  }
+  return { name, plane, height }
+}
+
+function meetingPair(r) {
+  const halfSeam = r.range(0.55, 0.85)
+  const seamBend = wave(r, 0, 0.15, 1, 2) // sideways wiggle of the seam, by y
+  const seamLift = wave(r, 0.04, 0.16, 1, 2) // height of the seam, by y
+  const scale = 1 / halfSeam // the waves see y in [-1, 1]
+  const left = randomPatch(r, halfSeam)
+  const right = randomPatch(r, halfSeam)
+
+  const point = (patch, mirror, u, v, out) => {
+    const [lx, ly] = patch.plane(mirror ? 1 - u : u, v)
+    const yy = ly * scale * 0.25 // a quarter turn of the waves over the seam
+    const z = patch.height(lx, ly, seamLift(yy))
+    return out.set((mirror ? -lx : lx) + seamBend(yy), ly, z)
+  }
+  return {
+    caption: `${left.name} meets ${right.name}`,
+    top: (u, v, out) => point(left, false, u, v, out),
+    bottom: (u, v, out) => point(right, true, u, v, out),
+  }
+}
+
+// Each shape builds its surface pair from a seed; `seeded` shapes use it. A
+// build may also return a `caption` describing what the seed picked.
 // The same seed gives the same body on the Stitched and Open seam tabs.
 // A null surface is hidden (it collapses onto the other first). Shapes with
 // `animation` take a fourth argument t in [0, 1], played over `duration` s.
@@ -308,11 +431,20 @@ export const SHAPES = {
     build: (seed) => {
       const r = rng(seed)
       const body = randomStitched(r) // drawn first, so it matches Stitched
-      return stitchedPair({
-        ...body,
-        open: { outer: randomTears(r, r.int(1, 3)), inner: randomTears(r, r.int(0, 2)) },
-      })
+      const { connected, outer, inner } = randomOpening(r)
+      return {
+        ...stitchedPair({ ...body, open: { outer, inner } }),
+        caption: `${connected}% of seam connected`,
+      }
     },
+  },
+
+  // Two different open surfaces meeting along one shared edge.
+  meeting: {
+    label: 'Meeting',
+    isocurves: [16, 6],
+    seeded: true,
+    build: (seed) => meetingPair(rng(seed)),
   },
 
   // One surface only: a rectangle rolling up into the torus's top half.
