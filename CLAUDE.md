@@ -10,15 +10,29 @@ npm run lint    # oxlint; keep it at zero warnings
 
 ## Verifying changes
 
-- Do not take screenshots, install puppeteer/playwright, or start servers to inspect rendering. The user checks visuals themselves with `npm run dev`.
+- Do not take screenshots, install puppeteer/playwright, or start servers to inspect rendering. The user checks visuals themselves, often on a phone via the GitHub Pages site.
 - Verify with `npm run lint` and `npm run build`, plus throwaway Node scripts for geometry maths (seam gaps, extents, normals, NaNs). Keep those scripts in `$TEMP` or the scratchpad, never in the repo, and delete them afterwards. Import three by absolute file URL (`node_modules/three/build/three.module.js`), because scripts outside the project can't resolve `'three'`.
 - Shader compile errors only show at runtime, so say plainly that the result is unseen.
+
+## Deploying
+
+- `.github/workflows/deploy.yml` runs lint and build and publishes `dist/` to GitHub Pages (https://kyuubimode7.github.io/topology-of-us/) on every push to `main`. Only `main` deploys.
+- The user has approved committing and pushing straight to `main` so changes show up on Pages. Lint and build must pass before every push.
+- `vite.config.js` uses `base: './'` so the build works from the `/topology-of-us/` subpath.
+- `npm install` in the cloud container rewrites `package-lock.json` (npm version churn). Revert it with `git checkout package-lock.json` unless dependencies actually changed.
 
 ## Files
 
 - `src/surfaces.js`: all geometry. Shape definitions (`SHAPES`), the shared sampling grid, `sampleSurface` / `createSurfaceGeometry` / `writeSurface`, the seeded RNG, and the roll-up animation.
-- `src/SurfacePair.jsx`: renderer, shaders, post-process quantisation, morph/animation state, pointer drag physics.
-- `src/App.jsx`: tabs and controls (seed, bands, replay). The page is dark-only, by request.
+- `src/SurfacePair.jsx`: renderer, shaders, post-process quantisation, morph/animation state, pointer drag physics, pinch/wheel zoom.
+- `src/App.jsx` + `src/App.css`: tabs and controls (seed, bands, replay). The page is dark-only, by request.
+
+## Mobile
+
+- The site must work on phones. The canvas width is clamped in `SurfacePair.css` to the viewport's width and height (`--size` is the preferred width from the `size` prop). Phones in landscape switch `.page` to a grid with the canvas beside the tabs and controls (`App.css`).
+- Touch targets grow under `(pointer: coarse)`; narrow screens (≤ 480 px) stack the controls. Tabs scroll sideways rather than widen the page.
+- The canvas has `touch-action: none`, so it can't scroll the page. Keep enough of the page outside it to scroll.
+- Input: one finger drags (only the first pointer); two fingers pinch-zoom the ortho camera (`camera.zoom`, 1–4×); the wheel zooms on desktop. A pinch ends the drag, and the drag restarts only on a fresh touch. Zoom is the only thing allowed to crop the ±2 frame.
 
 ## Shape model (surfaces.js)
 
