@@ -339,166 +339,52 @@ function rectangleToHalfTorus(u, v, out, t) {
 }
 
 /*
- * Two flat patches that meet along part of one straight line.
+ * Two flat rectangles side by side in the world xy plane, meeting along part
+ * of the line x = 0.
  *
- * Each patch is a flat, round-edged region with one straight edge (the
- * "seam"), laid out with the seam on lx = 0 and the patch on lx < 0. v = 0
- * runs along the seam, v = 1 along the free outer edge, and u runs from one
- * end of the seam to the other, so both v edges get the seam outline in the
- * shader. The right-hand patch is the mirror image (and runs u backwards, so
- * du x dv still points up, +z, which counts as the outside before rotating).
+ * Each rectangle has one edge on that line (the "seam"), with its own length
+ * and position along it, and reaches out to -x (top) or +x (bottom). They are
+ * joined only where their seam edges overlap. v = 0 runs along the seam and
+ * v = 1 along the far edge; u runs along the seam, backwards on the bottom
+ * one, so both normals point up (+z, the outside).
  *
- * Both seams lie on the same line but have their own lengths and positions
- * along it, so the patches are joined only where the seams overlap. Each
- * patch then swings about that line by its own angle, and the pair is turned
- * as a whole.
+ * Sizes are bounded so the pair always fits the frame without rescaling, and
+ * the seam line never moves: changing the seed reshapes the pair in place.
  */
-// Outer trim: a straight-sided outline from one end of the seam, round the
-// back, to the other. Either a polygon (4-7 sides counting the seam) or a
-// star (3-5 points). Vertices sit on directions d(phi) = (-sin, -cos) from
-// the seam's centre, phi in [0, PI]; their angles snap to grid columns so
-// corners and star tips land exactly on a grid line. The outline always
-// encloses the half-disc on the seam (radius halfSeam), which keeps the mesh
-// from folding (see randomFlatPatch).
-const POLYGON_NAMES = ['', '', '', '', 'quad', 'pentagon', 'hexagon', 'heptagon']
-
-function randomTrim(r, halfSeam) {
-  const star = r.range(0, 1) < 0.5
-  const points = star ? r.int(3, 5) : 0
-  const segments = star ? 2 * points : r.int(3, 6)
-  const vertices = [] // [phi, radius]
-  for (let k = 0; k <= segments; k++) {
-    if (k === 0 || k === segments) {
-      vertices.push([(Math.PI * k) / segments, halfSeam])
-      continue
-    }
-    const jitter = star ? 0 : r.range(-0.25, 0.25)
-    const phi = (Math.PI * Math.round((U_SEG * (k + jitter)) / segments)) / U_SEG
-    const size = star ? (k % 2 ? r.range(1.8, 2.4) : r.range(1.15, 1.35)) : r.range(1.3, 1.9)
-    vertices.push([phi, halfSeam * size])
-  }
-
-  let xy
-  const place = () => {
-    xy = vertices.map(([phi, radius]) => [-radius * Math.sin(phi), -radius * Math.cos(phi)])
-  }
-  // Distance from the seam's centre to the outline along d(phi).
-  const reach = (phi) => {
-    let k = 0
-    while (k < segments - 1 && phi > vertices[k + 1][0]) k++
-    const [px, py] = xy[k]
-    const ex = xy[k + 1][0] - px
-    const ey = xy[k + 1][1] - py
-    const dx = -Math.sin(phi)
-    const dy = -Math.cos(phi)
-    return (px * ey - py * ex) / (dx * ey - dy * ex)
-  }
-  // Grow the corners until the outline clears the half-disc everywhere.
-  place()
-  for (let tries = 0; tries < 20; tries++) {
-    let low = Infinity
-    for (let i = 1; i < 720; i++) low = Math.min(low, reach((Math.PI * i) / 720))
-    if (low >= halfSeam * 1.02) break
-    for (let k = 1; k < segments; k++) vertices[k][1] *= 1.1
-    place()
-  }
-  return { reach, name: star ? `${points}-point star` : POLYGON_NAMES[segments + 1] }
-}
-
-function randomFlatPatch(r) {
-  const halfSeam = r.range(0.45, 0.8)
-  const trim = randomTrim(r, halfSeam)
-
-  // Plane point (lx, ly) for grid (u, v), ly relative to the seam's centre,
-  // with phi = PI * u. The first half of v sweeps the half-disc on the seam
-  // (straight across from the seam to its rim); the second half runs
-  // straight out from the rim to the outline along d(phi). Neither half can
-  // fold, because the outline encloses the half-disc and is met once by
-  // every ray from the seam's centre.
-  const plane = (u, v) => {
-    const phi = Math.PI * u
-    const sin = Math.sin(phi)
-    const cos = Math.cos(phi)
-    if (v <= 0.5) return [-2 * v * halfSeam * sin, -halfSeam * cos]
-    const rho = lerp(halfSeam, trim.reach(phi), 2 * v - 1)
-    return [-rho * sin, -rho * cos]
-  }
-  return { halfSeam, plane, name: trim.name }
-}
-
-// Every pair is scaled to reach exactly this far from the centre, about the
-// torus's size (1.42), so seeds look alike in size and never fill the frame.
-const MEETING_RADIUS = 1.4
-// Meeting's grid-line spacing on screen (after scaling), about Roll up's.
-const ISO_SPACING = 0.3
+const ISO_SPACING = 0.3 // grid lines, square, about Roll up's density
 
 function meetingPair(r) {
-  const left = randomFlatPatch(r)
-  const right = randomFlatPatch(r)
+  const halves = [r.range(0.35, 0.7), r.range(0.35, 0.7)] // half seam lengths
+  const depths = [r.range(0.5, 1), r.range(0.5, 1)] // reach away from the seam
 
-  // Slide the seams along their shared line. They always overlap by at least
-  // 10% of the shorter seam, and at most fully.
-  const shorter = Math.min(left.halfSeam, right.halfSeam)
-  const longer = Math.max(left.halfSeam, right.halfSeam)
-  const shift = r.range(longer - shorter, longer + shorter - 0.2 * shorter) * (r.range(0, 1) < 0.5 ? -1 : 1)
-  const leftCentre = -shift / 2
-  const rightCentre = shift / 2
-  const overlap =
-    Math.min(leftCentre + left.halfSeam, rightCentre + right.halfSeam) -
-    Math.max(leftCentre - left.halfSeam, rightCentre - right.halfSeam)
-  const span =
-    Math.max(leftCentre + left.halfSeam, rightCentre + right.halfSeam) -
-    Math.min(leftCentre - left.halfSeam, rightCentre - right.halfSeam)
+  // Slide the seams along their line. They always overlap by at least 10% of
+  // the shorter seam, and at most fully.
+  const shorter = Math.min(...halves)
+  const longer = Math.max(...halves)
+  const shift = r.range(longer - shorter, longer + 0.8 * shorter) * (r.range(0, 1) < 0.5 ? -1 : 1)
+  const centres = [-shift / 2, shift / 2]
+  const ends = [0, 1].map((k) => [centres[k] - halves[k], centres[k] + halves[k]])
+  const overlap = Math.min(ends[0][1], ends[1][1]) - Math.max(ends[0][0], ends[1][0])
+  const span = Math.max(ends[0][1], ends[1][1]) - Math.min(ends[0][0], ends[1][0])
   const connected = Math.round((100 * overlap) / span)
 
-  // Hinge angles about the seam line, measured up from flat; the patches
-  // stay at least 30deg apart so they can't fold onto each other.
-  const leftDeg = r.range(-45, 90)
-  const rightDeg = r.range(-45, Math.min(90, 150 - leftDeg))
-  const between = Math.round(180 - leftDeg - rightDeg)
-  const hinge = (deg) => [Math.cos((deg * Math.PI) / 180), Math.sin((deg * Math.PI) / 180)]
-  const hinges = [hinge(leftDeg), hinge(rightDeg)]
-
-  // The shared line stays put (along y, through the centre) for every seed,
-  // so changing the seed reshapes the pair in place instead of flinging it
-  // round the frame. Only the size is normalised.
-  let scale = 1
-  const point = (patch, mirror, u, v, out) => {
-    const [lx, ly] = patch.plane(mirror ? 1 - u : u, v)
-    const [cos, sin] = hinges[mirror ? 1 : 0]
-    const rx = lx * cos
-    const rz = -lx * sin
-    const y = ly + (mirror ? rightCentre : leftCentre)
-    return out
-      .set(mirror ? -rx : rx, y, rz)
-      .multiplyScalar(scale)
+  // k = 0: top, reaching to -x with u along +y; k = 1: bottom, mirrored.
+  const local = (k, u, v) => {
+    const along = k ? 1 - u : u
+    return [(k ? 1 : -1) * depths[k] * v, centres[k] + halves[k] * (2 * along - 1)]
   }
-  const top = (u, v, out) => point(left, false, u, v, out)
-  const bottom = (u, v, out) => point(right, true, u, v, out)
-  // Grid lines along and across the seam line, square and evenly spaced in
-  // each patch's plane (ISO_SPACING apart on screen), continuous across the
-  // join. They read `scale` when sampled, after it is set below.
-  const iso = (patch, mirror) => (u, v) => {
-    const [lx, ly] = patch.plane(mirror ? 1 - u : u, v)
-    const y = ly + (mirror ? rightCentre : leftCentre)
-    return [(y * scale) / ISO_SPACING, (-lx * scale) / ISO_SPACING]
+  const surface = (k) => (u, v, out) => out.set(...local(k, u, v), 0)
+  // Square grid lines along and across the seam, continuous over the join.
+  const iso = (k) => (u, v) => {
+    const [x, y] = local(k, u, v)
+    return [y / ISO_SPACING, Math.abs(x) / ISO_SPACING]
   }
-
-  // Scale to MEETING_RADIUS.
-  const p = new THREE.Vector3()
-  let reach = 0
-  for (const f of [top, bottom]) {
-    for (let j = 0; j <= V_SEG; j++) {
-      for (let i = 0; i <= U_SEG; i++) reach = Math.max(reach, f(i / U_SEG, j / V_SEG, p).length())
-    }
-  }
-  scale = MEETING_RADIUS / reach
 
   return {
-    caption: `${left.name} and ${right.name}, ${between}° apart, ${connected}% of edge connected`,
-    top,
-    bottom,
-    iso: { top: iso(left, false), bottom: iso(right, true) },
+    caption: `${connected}% of edge connected`,
+    top: surface(0),
+    bottom: surface(1),
+    iso: { top: iso(0), bottom: iso(1) },
   }
 }
 
@@ -546,7 +432,7 @@ export const SHAPES = {
     },
   },
 
-  // Two flat patches meeting along part of one shared edge.
+  // Two flat rectangles meeting along part of one shared edge.
   meeting: {
     label: 'Meeting',
     isocurves: [16, 6], // unused: the build gives its own grid lines
