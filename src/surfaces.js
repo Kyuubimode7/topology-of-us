@@ -426,7 +426,9 @@ function randomFlatPatch(r) {
   return { halfSeam, plane, name: trim.name }
 }
 
-const FIT_RADIUS = 1.8 // scale a pair down if it would reach past this
+// Every pair is scaled to reach exactly this far from the centre, about the
+// torus's size (1.42), so seeds look alike in size and never fill the frame.
+const MEETING_RADIUS = 1.4
 const ISO_SPACING = 0.15 // Meeting's grid lines, in patch units
 
 function meetingPair(r) {
@@ -484,7 +486,7 @@ function meetingPair(r) {
     return [y / ISO_SPACING, -lx / ISO_SPACING]
   }
 
-  // Centre the pair's bounding box, then shrink it if it reaches too far.
+  // Centre the pair's bounding box, then scale it to MEETING_RADIUS.
   const box = new THREE.Box3()
   const p = new THREE.Vector3()
   for (const f of [top, bottom]) {
@@ -499,7 +501,7 @@ function meetingPair(r) {
       for (let i = 0; i <= U_SEG; i++) reach = Math.max(reach, f(i / U_SEG, j / V_SEG, p).length())
     }
   }
-  scale = Math.min(1, FIT_RADIUS / reach)
+  scale = MEETING_RADIUS / reach
 
   return {
     caption: `${left.name} and ${right.name}, ${between}° apart, ${connected}% of edge connected`,
