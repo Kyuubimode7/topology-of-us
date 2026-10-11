@@ -78,8 +78,27 @@ export function sampleSurface(fn, grid = new Float32Array(COLS * (V_SEG + 1) * 3
   return grid
 }
 
+// Isocurve coordinates on the same grid, packed ab: lines are drawn where a or
+// b is a whole number. They are separate from (u, v) so a shape can draw lines
+// that don't follow its parametrisation, and they morph along with positions.
+export function sampleIso(fn, grid = new Float32Array(COLS * (V_SEG + 1) * 2)) {
+  for (let j = 0; j <= V_SEG; j++) {
+    for (let i = 0; i <= U_SEG; i++) {
+      const [a, b] = fn(i / U_SEG, j / V_SEG)
+      const k = (j * COLS + i) * 2
+      grid[k] = a
+      grid[k + 1] = b
+    }
+  }
+  return grid
+}
+
+// The usual isocurves: [countU, countV] evenly spaced lines along u and v.
+export const gridIso = ([countU, countV]) => (u, v) => [u * countU, v * countV]
+
 // Non-indexed so every quad gets one flat normal (the painter's-algorithm
-// look). Positions and normals are filled by writeSurface.
+// look). Positions, normals and isocurve coordinates are filled by
+// writeSurface.
 export function createSurfaceGeometry() {
   const uvs = new Float32Array(QUADS * 12)
   let k = 0
@@ -95,15 +114,17 @@ export function createSurfaceGeometry() {
   g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(QUADS * 18), 3))
   g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(QUADS * 18), 3))
   g.setAttribute('uv', new THREE.BufferAttribute(uvs, 2))
+  g.setAttribute('iso', new THREE.BufferAttribute(new Float32Array(QUADS * 12), 2))
   return g
 }
 
 // Fill a geometry from grid points. Cheap enough to run every frame while
 // morphing. Normals follow the triangle winding; the shader flips them with
 // gl_FrontFacing, so orientation is free.
-export function writeSurface(geometry, grid) {
+export function writeSurface(geometry, grid, isoGrid) {
   const positions = geometry.attributes.position.array
   const normals = geometry.attributes.normal.array
+  const isos = geometry.attributes.iso.array
   const at = (i, j) => (j * COLS + i) * 3
 
   let k = 0
@@ -126,6 +147,9 @@ export function writeSurface(geometry, grid) {
 
       for (const [di, dj] of CORNERS) {
         const p = at(i + di, j + dj)
+        const q = (p / 3) * 2
+        isos[(k / 3) * 2] = isoGrid[q]
+        isos[(k / 3) * 2 + 1] = isoGrid[q + 1]
         positions[k] = grid[p]
         positions[k + 1] = grid[p + 1]
         positions[k + 2] = grid[p + 2]
@@ -139,6 +163,7 @@ export function writeSurface(geometry, grid) {
 
   geometry.attributes.position.needsUpdate = true
   geometry.attributes.normal.needsUpdate = true
+  geometry.attributes.iso.needsUpdate = true
   geometry.computeBoundingSphere()
 }
 
@@ -328,27 +353,81 @@ function rectangleToHalfTorus(u, v, out, t) {
  * patch then swings about that line by its own angle, and the pair is turned
  * as a whole.
  */
-function randomFlatPatch(r) {
-  const halfSeam = r.range(0.45, 0.85)
-  const depth = r.range(0.9, 1.35) // how far the patch reaches from the seam
-  const flare = r.range(0, 0.3) // outer edge wider than the seam
-  const lobes = r.range(0, 0.12)
-  const lobeFreq = r.int(2, 4)
-  const lean = r.range(-0.25, 0.25)
+// Outer trim: a straight-sided outline from one end of the seam, round the
+// back, to the other. Either a polygon (4-7 sides counting the seam) or a
+// star (3-5 points). Vertices sit on directions d(phi) = (-sin, -cos) from
+// the seam's centre, phi in [0, PI]; their angles snap to grid columns so
+// corners and star tips land exactly on a grid line. The outline always
+// encloses the half-disc on the seam (radius halfSeam), which keeps the mesh
+// from folding (see randomFlatPatch).
+const POLYGON_NAMES = ['', '', '', '', 'quad', 'pentagon', 'hexagon', 'heptagon']
 
-  // Plane point (lx, ly) for grid (u, v), ly relative to the seam's centre.
-  const plane = (u, v) => {
-    const psi = Math.PI * u
-    const sin = Math.sin(psi)
-    const cos = Math.cos(psi)
-    const reach = depth * sin * (1 + lobes * Math.sin(lobeFreq * psi))
-    const outerY = -cos * (halfSeam + flare * sin) + lean * sin * sin
-    return [-reach * v, lerp(-halfSeam * cos, outerY, v)]
+function randomTrim(r, halfSeam) {
+  const star = r.range(0, 1) < 0.5
+  const points = star ? r.int(3, 5) : 0
+  const segments = star ? 2 * points : r.int(3, 6)
+  const vertices = [] // [phi, radius]
+  for (let k = 0; k <= segments; k++) {
+    if (k === 0 || k === segments) {
+      vertices.push([(Math.PI * k) / segments, halfSeam])
+      continue
+    }
+    const jitter = star ? 0 : r.range(-0.25, 0.25)
+    const phi = (Math.PI * Math.round((U_SEG * (k + jitter)) / segments)) / U_SEG
+    const size = star ? (k % 2 ? r.range(1.8, 2.4) : r.range(1.15, 1.35)) : r.range(1.3, 1.9)
+    vertices.push([phi, halfSeam * size])
   }
-  return { halfSeam, plane }
+
+  let xy
+  const place = () => {
+    xy = vertices.map(([phi, radius]) => [-radius * Math.sin(phi), -radius * Math.cos(phi)])
+  }
+  // Distance from the seam's centre to the outline along d(phi).
+  const reach = (phi) => {
+    let k = 0
+    while (k < segments - 1 && phi > vertices[k + 1][0]) k++
+    const [px, py] = xy[k]
+    const ex = xy[k + 1][0] - px
+    const ey = xy[k + 1][1] - py
+    const dx = -Math.sin(phi)
+    const dy = -Math.cos(phi)
+    return (px * ey - py * ex) / (dx * ey - dy * ex)
+  }
+  // Grow the corners until the outline clears the half-disc everywhere.
+  place()
+  for (let tries = 0; tries < 20; tries++) {
+    let low = Infinity
+    for (let i = 1; i < 720; i++) low = Math.min(low, reach((Math.PI * i) / 720))
+    if (low >= halfSeam * 1.02) break
+    for (let k = 1; k < segments; k++) vertices[k][1] *= 1.1
+    place()
+  }
+  return { reach, name: star ? `${points}-point star` : POLYGON_NAMES[segments + 1] }
+}
+
+function randomFlatPatch(r) {
+  const halfSeam = r.range(0.45, 0.8)
+  const trim = randomTrim(r, halfSeam)
+
+  // Plane point (lx, ly) for grid (u, v), ly relative to the seam's centre,
+  // with phi = PI * u. The first half of v sweeps the half-disc on the seam
+  // (straight across from the seam to its rim); the second half runs
+  // straight out from the rim to the outline along d(phi). Neither half can
+  // fold, because the outline encloses the half-disc and is met once by
+  // every ray from the seam's centre.
+  const plane = (u, v) => {
+    const phi = Math.PI * u
+    const sin = Math.sin(phi)
+    const cos = Math.cos(phi)
+    if (v <= 0.5) return [-2 * v * halfSeam * sin, -halfSeam * cos]
+    const rho = lerp(halfSeam, trim.reach(phi), 2 * v - 1)
+    return [-rho * sin, -rho * cos]
+  }
+  return { halfSeam, plane, name: trim.name }
 }
 
 const FIT_RADIUS = 1.8 // scale a pair down if it would reach past this
+const ISO_SPACING = 0.15 // Meeting's grid lines, in patch units
 
 function meetingPair(r) {
   const left = randomFlatPatch(r)
@@ -397,6 +476,13 @@ function meetingPair(r) {
   }
   const top = (u, v, out) => point(left, false, u, v, out)
   const bottom = (u, v, out) => point(right, true, u, v, out)
+  // Grid lines along and across the seam line, square and evenly spaced in
+  // each patch's plane, and continuous across the join.
+  const iso = (patch, mirror) => (u, v) => {
+    const [lx, ly] = patch.plane(mirror ? 1 - u : u, v)
+    const y = ly + (mirror ? rightCentre : leftCentre)
+    return [y / ISO_SPACING, -lx / ISO_SPACING]
+  }
 
   // Centre the pair's bounding box, then shrink it if it reaches too far.
   const box = new THREE.Box3()
@@ -416,14 +502,17 @@ function meetingPair(r) {
   scale = Math.min(1, FIT_RADIUS / reach)
 
   return {
-    caption: `planes ${between}° apart, ${connected}% of edge connected`,
+    caption: `${left.name} and ${right.name}, ${between}° apart, ${connected}% of edge connected`,
     top,
     bottom,
+    iso: { top: iso(left, false), bottom: iso(right, true) },
   }
 }
 
 // Each shape builds its surface pair from a seed; `seeded` shapes use it. A
-// build may also return a `caption` describing what the seed picked.
+// build may also return a `caption` describing what the seed picked, and
+// `iso: { top, bottom }`, (u, v) -> [a, b] isocurve coordinates to use instead
+// of the `isocurves` grid. `tumble: false` shapes don't spin on their own.
 // The same seed gives the same body on the Stitched and Open seam tabs.
 // A null surface is hidden (it collapses onto the other first). Shapes with
 // `animation` take a fourth argument t in [0, 1], played over `duration` s.
@@ -467,8 +556,9 @@ export const SHAPES = {
   // Two flat patches meeting along part of one shared edge.
   meeting: {
     label: 'Meeting',
-    isocurves: [16, 6],
+    isocurves: [16, 6], // unused: the build gives its own grid lines
     seeded: true,
+    tumble: false,
     build: (seed) => meetingPair(rng(seed)),
   },
 

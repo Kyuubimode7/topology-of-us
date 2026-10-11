@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
-import { createSurfaceGeometry, sampleSurface, writeSurface } from './surfaces.js'
+import { createSurfaceGeometry, gridIso, sampleIso, sampleSurface, writeSurface } from './surfaces.js'
 import './SurfacePair.css'
 
 // z-up world, set before any Object3D is created.
@@ -67,13 +67,16 @@ const lineGlsl = /* glsl */ `
 
 const meshVertexShader = /* glsl */ `
   uniform mat4 uShadowMatrix; // world -> light texture space [0,1]^3
+  attribute vec2 iso;
 
   varying vec3 vNormal;
   varying vec2 vUv;
+  varying vec2 vIso;
   varying vec3 vShadowCoord;
 
   void main() {
     vUv = uv;
+    vIso = iso;
     vNormal = normalize(normalMatrix * normal);
     vShadowCoord = (uShadowMatrix * modelMatrix * vec4(position, 1.0)).xyz;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
@@ -82,11 +85,11 @@ const meshVertexShader = /* glsl */ `
 
 const meshFragmentShader = /* glsl */ `
   uniform vec3 uColour;
-  uniform vec2 uIsoCount; // isocurves per surface along u and v
   uniform sampler2D uShadowMap;
 
   varying vec3 vNormal;
   varying vec2 vUv;
+  varying vec2 vIso; // isocurves where either is a whole number
   varying vec3 vShadowCoord;
 
   const vec3 L = normalize(vec3(-0.4, 0.7, 0.6)); // camera space, fixed to the camera
@@ -94,11 +97,9 @@ const meshFragmentShader = /* glsl */ `
   ${shadeGlsl}
   ${lineGlsl}
 
-  // 1 within LINE_HALF_WIDTH output pixels of an iso-line of x, else 0. Hard
-  // edged on purpose: the post pass's box filter does the anti-aliasing.
-  float isoLine(float x, float count) {
-    if (count <= 0.0) return 0.0;
-    float g = x * count;
+  // 1 within LINE_HALF_WIDTH output pixels of a whole value of g, else 0.
+  // Hard edged on purpose: the post pass's box filter does the anti-aliasing.
+  float isoLine(float g) {
     float dist = abs(fract(g - 0.5) - 0.5);
     return step(dist / max(fwidth(g), 1e-6), ${LINE_HALF_WIDTH * SS}.0);
   }
@@ -131,7 +132,7 @@ const meshFragmentShader = /* glsl */ `
 
     float edgeDist = min(vUv.y, 1.0 - vUv.y) / max(fwidth(vUv.y), 1e-6);
     bool seam = edgeDist <= ${SEAM_HALF_WIDTH * SS}.0;
-    float line = max(isoLine(vUv.x, uIsoCount.x), isoLine(vUv.y, uIsoCount.y));
+    float line = max(isoLine(vIso.x), isoLine(vIso.y));
     if (seam) col = seamColor(col);
     else if (line > 0.0) col = lineColor(col);
     gl_FragColor = vec4(col, 1.0);
@@ -204,16 +205,15 @@ const postFragmentShader = /* glsl */ `
 
 const easeInOutCubic = (t) => (t < 0.5 ? 4 * t ** 3 : 1 - (-2 * t + 2) ** 3 / 2)
 
-// The two surface meshes, each with its own colour, sharing isocurve counts.
-// Each surface keeps grid points: `current` is what's shown, morphing from
-// `from` to `to`. A new target starts from `current`, so changes mid-morph
+// The two surface meshes, each with its own colour. Each surface keeps grid
+// points: `current` is what's shown, morphing from `from` to `to`, and the
+// same for its isocurve coordinates (`iso*`). A new target starts from `current`, so changes mid-morph
 // carry on smoothly instead of jumping.
 function createModel() {
   const colours = {
     uTop: { value: new THREE.Vector3() },
     uBottom: { value: new THREE.Vector3() },
   }
-  const isoCount = { value: new THREE.Vector2() }
   // Filled in by the renderer, which owns the shadow map.
   const shadow = {
     uShadowMap: { value: null },
@@ -224,7 +224,7 @@ function createModel() {
     const material = new THREE.ShaderMaterial({
       vertexShader: meshVertexShader,
       fragmentShader: meshFragmentShader,
-      uniforms: { uColour: colour, uIsoCount: isoCount, ...shadow },
+      uniforms: { uColour: colour, ...shadow },
       side: THREE.DoubleSide,
     })
     const mesh = new THREE.Mesh(createSurfaceGeometry(), material)
@@ -236,6 +236,9 @@ function createModel() {
     from: null,
     to: null,
     current: null,
+    isoFrom: null,
+    isoTo: null,
+    isoCurrent: null,
     present: true,
   }))
   let morphStart = 0
@@ -250,12 +253,18 @@ function createModel() {
   // A hidden surface follows the shown one, so it peels off it when it returns.
   const syncMissing = () => {
     const shown = surfaces.find((s) => s.present)
-    for (const s of surfaces) if (!s.present) s.current.set(shown.current)
+    for (const s of surfaces) {
+      if (!s.present) {
+        s.current.set(shown.current)
+        s.isoCurrent.set(shown.isoCurrent)
+      }
+    }
   }
 
   // fns: [top, bottom], either may be null (hidden). With `anim`, fns take t
-  // and the morph goes to t = 0 before the animation plays.
-  const setTargets = (fns, anim) => {
+  // and the morph goes to t = 0 before the animation plays. isoFns: [top,
+  // bottom] isocurve coordinates, (u, v) -> [a, b].
+  const setTargets = (fns, anim, isoFns) => {
     const atStart = fns.map((fn) => fn && (anim ? (u, v, o) => fn(u, v, o, 0) : fn))
     const fallback = atStart.find(Boolean)
     surfaces.forEach((s, i) => {
@@ -263,12 +272,15 @@ function createModel() {
       if (s.present) s.mesh.visible = true
       // A missing surface morphs onto the shown one, then hides.
       s.to = sampleSurface(atStart[i] ?? fallback)
+      s.isoTo = sampleIso(isoFns[i])
       if (s.current) {
         s.from = s.current.slice()
+        s.isoFrom = s.isoCurrent.slice()
       } else {
         // First shape: show it straight away.
         s.current = s.to.slice()
-        writeSurface(s.mesh.geometry, s.current)
+        s.isoCurrent = s.isoTo.slice()
+        writeSurface(s.mesh.geometry, s.current, s.isoCurrent)
       }
     })
     morphStart = performance.now()
@@ -283,9 +295,12 @@ function createModel() {
     if (morphing) {
       const t = Math.min((now - morphStart) / (MORPH_S * 1000), 1)
       const e = easeInOutCubic(t)
-      for (const { mesh, from, to, current } of surfaces) {
+      for (const { mesh, from, to, current, isoFrom, isoTo, isoCurrent } of surfaces) {
         for (let k = 0; k < current.length; k++) current[k] = from[k] + (to[k] - from[k]) * e
-        writeSurface(mesh.geometry, current)
+        for (let k = 0; k < isoCurrent.length; k++) {
+          isoCurrent[k] = isoFrom[k] + (isoTo[k] - isoFrom[k]) * e
+        }
+        writeSurface(mesh.geometry, current, isoCurrent)
       }
       if (t === 1) {
         morphing = false
@@ -301,14 +316,14 @@ function createModel() {
         const fn = animation.fns[i]
         if (!fn) return
         sampleSurface((u, v, o) => fn(u, v, o, t), s.current)
-        writeSurface(s.mesh.geometry, s.current)
+        writeSurface(s.mesh.geometry, s.current, s.isoCurrent)
       })
       syncMissing()
       if (t === 1) animation = null
     }
   }
 
-  return { group, meshes, colours, isoCount, shadow, setTargets, step }
+  return { group, meshes, colours, shadow, setTargets, step }
 }
 
 // Renders a shape from surfaces.js: two surfaces stitched at their seams, the
@@ -332,14 +347,17 @@ export default function SurfacePair({
   const getModel = () => (modelRef.current ??= createModel())
 
   useEffect(() => {
-    paramsRef.current = { top, bottom, steps, resumeDelay }
-  }, [top, bottom, steps, resumeDelay])
+    // Shapes with `tumble: false` don't spin on their own.
+    paramsRef.current = { top, bottom, steps, resumeDelay, spin: shape.tumble !== false }
+  }, [top, bottom, steps, resumeDelay, shape])
 
   useEffect(() => {
     const model = getModel()
     const pair = shape.build(seed)
-    model.setTargets([pair.top, pair.bottom], shape.animation ?? null)
-    model.isoCount.value.set(...shape.isocurves)
+    // A shape may give its own isocurve coordinates; otherwise lines follow
+    // its (u, v) grid.
+    const iso = pair.iso ?? { top: gridIso(shape.isocurves), bottom: gridIso(shape.isocurves) }
+    model.setTargets([pair.top, pair.bottom], shape.animation ?? null, [iso.top, iso.bottom])
   }, [shape, seed, replay])
 
   useEffect(() => {
@@ -546,7 +564,7 @@ export default function SurfacePair({
     canvas.addEventListener('wheel', onWheel, { passive: false })
 
     renderer.setAnimationLoop((ms) => {
-      const { top, bottom, steps, resumeDelay } = paramsRef.current
+      const { top, bottom, steps, resumeDelay, spin } = paramsRef.current
       colourUniforms.uTop.value.set(top[0], top[1], top[2]).divideScalar(255)
       colourUniforms.uBottom.value.set(bottom[0], bottom[1], bottom[2]).divideScalar(255)
       postMaterial.uniforms.uSteps.value = Math.min(steps, MAX_STEPS)
@@ -555,7 +573,9 @@ export default function SurfacePair({
       const dt = lastMs === null ? 0 : Math.min((ms - lastMs) / 1000, 0.1)
       lastMs = ms
       const idle = !dragging && performance.now() - lastInteraction > resumeDelay * 1000
-      if (idle) phase = (phase + dt / PERIOD_S) % 1
+      if (idle && spin) phase = (phase + dt / PERIOD_S) % 1
+      // Not spinning: settle back to the reference view the short way round.
+      if (!spin) phase = (((phase > 0.5 ? phase - 1 : phase) * Math.exp(-3 * dt)) + 1) % 1
 
       // Fixed substeps keep the stiff drag spring stable at any frame rate.
       accumulator += dt
